@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio & Wako Kids Weekly Schedule Static Catalog (TMDB Certification & Genre Powered)
+ * build.js — Stremio & Wako Kids Weekly Schedule (TVMaze Schedule + TMDB Certification Filtering)
  */
 
 import fs from "fs";
@@ -59,10 +59,12 @@ function getLatestValidDate(show, todayStr) {
   return maxDate;
 }
 
+/**
+ * Fetch TMDB certification and genres. We rely strictly on TMDB for age certificates.
+ */
 async function getTmdbDetails(tmdbId, country = "US") {
-  if (!tmdbId) return { certification: null, genres: [], tmdbType: "" };
+  if (!tmdbId) return { certification: null, genres: [] };
   
-  // Fetch TV show details and content ratings in parallel
   const [details, ratingsData] = await Promise.all([
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`),
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`)
@@ -77,51 +79,32 @@ async function getTmdbDetails(tmdbId, country = "US") {
 
 function evaluateExclusion(show, tmdbData) {
   const name = (show.name || "").toLowerCase();
-  const tvmazeGenres = (show.genres || []).map(g => g.toLowerCase());
-  const lang = (show.language || "").toLowerCase();
-  const { certification, genres: tmdbGenres } = tmdbData;
+  const { certification } = tmdbData;
 
-  // 1. Hard block obvious adult/reality/soap/news franchises
+  // 1. Hard block obvious adult/news/talk/reality franchises that might slip through
   const blockedTitles = [
-    "dancing with the stars", "strictly come dancing", "survivor", "masked singer", 
-    "big brother", "the bachelor", "the bachelorette", "love island", "masterchef", 
-    "the voice", "americas got talent", "britains got talent", "rupaul", "shark tank", 
-    "top chef", "the amazing race", "american idol", "the kardashians", 
+    "gma", "news", "hallmark", "heartland", "simpsons", "georgie & mandy", 
     "young and the restless", "bold and the beautiful", "days of our lives", 
-    "general hospital", "beyond the gates", "assisted living", "smosh"
+    "general hospital", "dancing with the stars", "survivor", "masked singer", 
+    "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians"
   ];
   if (blockedTitles.some(title => name.includes(title))) {
-    return { exclude: true, reason: `Excluded: Adult/Soap/Reality Franchise (${show.name})` };
+    return { exclude: true, reason: `Excluded by title blocklist (${show.name})` };
   }
 
-  // 2. If TMDB certification explicitly rates it mature/teen-adult, block it
-  const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17"];
-  if (certification) {
-    const certUpper = certification.toUpperCase();
-    if (blockedCertifications.includes(certUpper)) {
-      return { exclude: true, reason: `Blocked Certification (${certification})` };
-    }
-  }
-
-  // 3. Block non-kids formats & languages
-  const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
-  if (blockedLanguages.includes(lang)) {
-    return { exclude: true, reason: `Blocked Language (${lang})` };
-  }
-
-  // 4. Safe Kids Validation (Accept if TMDB says TV-Y, TV-Y7, TV-G, or if genres include Kids/Animation/Family from either platform)
-  const safeCerts = ["TV-Y", "TV-Y7", "TV-G", "G", "TV-PG", "PG"]; // Allow PG/TV-PG only if backed by kids genres
-  const allGenres = [...new Set([...tvmazeGenres, ...tmdbGenres])];
+  // 2. STENCT CERTIFICATION CHECK: Must have a valid child-friendly TMDB certificate
+  const allowedCertifications = ["TV-Y", "TV-Y7", "TV-G", "G"];
   
-  const hasKidsTags = allGenres.some(g => ["animation", "family", "children", "kids", "anime"].includes(g));
-  const hasSafeCert = certification && safeCerts.includes(certification.toUpperCase());
-
-  // If it has a safe kids certification (like TV-Y for Transformers) OR has animation/family tags, let it through!
-  if (!hasSafeCert && !hasKidsTags) {
-    return { exclude: true, reason: "Excluded: Lacks kids certification or family/animation genres" };
+  if (!certification) {
+    return { exclude: true, reason: "Excluded: Missing TMDB age certification" };
   }
 
-  return { exclude: false, reason: `Passed validation (Cert: ${certification || 'None'}, Genres: ${allGenres.join(', ')})` };
+  const certUpper = certification.toUpperCase();
+  if (!allowedCertifications.includes(certUpper)) {
+    return { exclude: true, reason: `Excluded: Certification '${certification}' is not TV-Y, TV-Y7, TV-G, or G` };
+  }
+
+  return { exclude: false, reason: `Passed TMDB certification check: ${certUpper}` };
 }
 
 async function findTmdbId(show) {
@@ -176,13 +159,14 @@ async function build() {
     }
   }
 
-  console.log(`Processing metadata mappings for ${activeShowIds.size} shows...`);
+  console.log(`Processing metadata mappings for ${activeShowIds.size} shows using TMDB certifications...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     if (!showData) continue;
 
+    // Pull TMDB ID and evaluate strictly using TMDB content ratings
     const tmdbId = await findTmdbId(showData);
     const tmdbData = await getTmdbDetails(tmdbId);
 
@@ -210,8 +194,8 @@ async function build() {
       tvmazeId: showData.id,
       type: "series",
       name: showData.name,
-      genres: [...new Set([...showData.genres, ...tmdbData.genres])],
-      certification: tmdbData.certification || undefined,
+      genres: tmdbData.genres.length > 0 ? tmdbData.genres : showData.genres,
+      certification: tmdbData.certification,
       year: showData.premiered ? showData.premiered.split("-")[0] : undefined,
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
@@ -246,7 +230,7 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            TVMAZE + TMDB CERTIFICATION & GENRE REPORT                          ");
+  console.log("            TVMAZE SCHEDULE + STRICT TMDB CERTIFICATION REPORT                  ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
