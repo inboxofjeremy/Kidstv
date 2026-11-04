@@ -64,11 +64,10 @@ function getLatestValidDate(show, todayStr) {
 async function findTmdbId(show) {
   if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
 
-  // 1. Strict Match via External IMDb ID
+  // 1. Match via IMDb ID (TVMaze full show object provides show.externals.imdb)
   if (show.externals?.imdb) {
-    const imdbId = show.externals.imdb.startsWith('tt') 
-      ? show.externals.imdb 
-      : `tt${show.externals.imdb}`;
+    const rawImdb = String(show.externals.imdb).trim();
+    const imdbId = rawImdb.startsWith('tt') ? rawImdb : `tt${rawImdb}`;
       
     const findRes = await fetchJSON(
       `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
@@ -79,7 +78,7 @@ async function findTmdbId(show) {
     }
   }
 
-  // 2. Strict Match via Exact Title Comparison (No Fuzzy Guessing)
+  // 2. Strict Title Matching (Exact normalized string comparison)
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const cleanTitle = (show.name || "").replace(/\s*\(\d{4}\)\s*/g, "").trim();
   const targetNormalized = normalizeTitle(cleanTitle);
@@ -89,7 +88,7 @@ async function findTmdbId(show) {
   );
   
   if (search?.results?.length > 0) {
-    const exactMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
+    const exactMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized || normalizeTitle(r.original_name) === targetNormalized);
     if (exactMatch) {
       return exactMatch.id;
     }
@@ -192,6 +191,7 @@ async function build() {
 
   const metas = [];
   for (const showId of activeShowIds) {
+    // Fetch full TVMaze show data to ensure externals (including IMDb ID) are loaded
     const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
     if (!showData) continue;
 
