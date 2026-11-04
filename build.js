@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio & Wako Kids Weekly Schedule Static Catalog (Strict Whitelist without Keyword Lists)
+ * build.js — Stremio & Wako Kids Weekly Schedule Static Catalog (Strict Whitelist)
  */
 
 import fs from "fs";
@@ -9,7 +9,8 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-const CATALOG_DIR = path.join(__dirname, "catalog", "kids_series");
+// Updated directory to match what your deployment script expects
+const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
 
@@ -101,7 +102,6 @@ function evaluateExclusion(show, certification) {
   const hasAnimationGenre = genres.includes("animation") || genres.includes("children") || genres.includes("family");
   const hasSafeCert = certification && allowedCertifications.includes(certification.toUpperCase());
 
-  // A show must belong to a kids network, OR have a certified Y/Y7/G rating combined with an animation/children/family genre.
   if (!hasKidsNetwork && !(hasAnimationGenre && hasSafeCert)) {
     return { exclude: true, reason: "Excluded: Failed strict kids validation whitelist" };
   }
