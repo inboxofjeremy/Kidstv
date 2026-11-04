@@ -1,5 +1,5 @@
 /**
- * build.js — Stremio & Wako Kids Weekly Schedule Static Catalog (Strict Whitelist)
+ * build.js — Stremio & Wako Kids Weekly Schedule Static Catalog (TMDB Certification & Genre Powered)
  */
 
 import fs from "fs";
@@ -9,7 +9,6 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-// Updated directory to match what your deployment script expects
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
@@ -60,31 +59,43 @@ function getLatestValidDate(show, todayStr) {
   return maxDate;
 }
 
-async function getTmdbCertification(tmdbId, country = "US") {
-  if (!tmdbId) return null;
-  const data = await fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`);
-  if (!data?.results) return null;
+async function getTmdbDetails(tmdbId, country = "US") {
+  if (!tmdbId) return { certification: null, genres: [], tmdbType: "" };
+  
+  // Fetch TV show details and content ratings in parallel
+  const [details, ratingsData] = await Promise.all([
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`),
+    fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`)
+  ]);
 
-  const ratingObj = data.results.find(r => r.iso_3166_1 === country) || data.results[0];
-  return ratingObj ? ratingObj.rating : null;
+  const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
+  const certification = ratingObj ? ratingObj.rating : null;
+  const genres = details?.genres ? details.genres.map(g => g.name.toLowerCase()) : [];
+
+  return { certification, genres };
 }
 
-function evaluateExclusion(show, certification) {
+function evaluateExclusion(show, tmdbData) {
   const name = (show.name || "").toLowerCase();
-  const genres = (show.genres || []).map(g => g.toLowerCase());
-  const webChannel = (show.webChannel?.name || "").toLowerCase();
-  const network = (show.network?.name || "").toLowerCase();
+  const tvmazeGenres = (show.genres || []).map(g => g.toLowerCase());
+  const lang = (show.language || "").toLowerCase();
+  const { certification, genres: tmdbGenres } = tmdbData;
 
-  // 1. Hard block obvious adult networks or terms if they leak in
-  const blockedTerms = ["news", "sport", "pga", "nfl", "ufc", "wwe", "aew", "housewives", "kardashians", "bachelor", "survivor", "dancing with the stars"];
-  if (blockedTerms.some(term => name.includes(term) || network.includes(term))) {
-    return { exclude: true, reason: "Blocked: Matched adult/news/sports keyword" };
+  // 1. Hard block obvious adult/reality/soap/news franchises
+  const blockedTitles = [
+    "dancing with the stars", "strictly come dancing", "survivor", "masked singer", 
+    "big brother", "the bachelor", "the bachelorette", "love island", "masterchef", 
+    "the voice", "americas got talent", "britains got talent", "rupaul", "shark tank", 
+    "top chef", "the amazing race", "american idol", "the kardashians", 
+    "young and the restless", "bold and the beautiful", "days of our lives", 
+    "general hospital", "beyond the gates", "assisted living", "smosh"
+  ];
+  if (blockedTitles.some(title => name.includes(title))) {
+    return { exclude: true, reason: `Excluded: Adult/Soap/Reality Franchise (${show.name})` };
   }
 
-  // 2. Enforce certification limits if present
-  const allowedCertifications = ["TV-Y", "TV-Y7", "TV-G", "G"];
-  const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17", "TV-PG", "PG"];
-
+  // 2. If TMDB certification explicitly rates it mature/teen-adult, block it
+  const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17"];
   if (certification) {
     const certUpper = certification.toUpperCase();
     if (blockedCertifications.includes(certUpper)) {
@@ -92,21 +103,25 @@ function evaluateExclusion(show, certification) {
     }
   }
 
-  // 3. Kids Networks Whitelist & Animation/Family Genre Checks
-  const kidsNetworks = [
-    "disney channel", "disney junior", "disney+", "nickelodeon", "nick jr", 
-    "cartoon network", "cbeebies", "cbbc", "pbs kids", "netflix", "apple tv+"
-  ];
-
-  const hasKidsNetwork = kidsNetworks.some(net => network.includes(net) || webChannel.includes(net));
-  const hasAnimationGenre = genres.includes("animation") || genres.includes("children") || genres.includes("family");
-  const hasSafeCert = certification && allowedCertifications.includes(certification.toUpperCase());
-
-  if (!hasKidsNetwork && !(hasAnimationGenre && hasSafeCert)) {
-    return { exclude: true, reason: "Excluded: Failed strict kids validation whitelist" };
+  // 3. Block non-kids formats & languages
+  const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
+  if (blockedLanguages.includes(lang)) {
+    return { exclude: true, reason: `Blocked Language (${lang})` };
   }
 
-  return { exclude: false, reason: "Passed strict kids verification" };
+  // 4. Safe Kids Validation (Accept if TMDB says TV-Y, TV-Y7, TV-G, or if genres include Kids/Animation/Family from either platform)
+  const safeCerts = ["TV-Y", "TV-Y7", "TV-G", "G", "TV-PG", "PG"]; // Allow PG/TV-PG only if backed by kids genres
+  const allGenres = [...new Set([...tvmazeGenres, ...tmdbGenres])];
+  
+  const hasKidsTags = allGenres.some(g => ["animation", "family", "children", "kids", "anime"].includes(g));
+  const hasSafeCert = certification && safeCerts.includes(certification.toUpperCase());
+
+  // If it has a safe kids certification (like TV-Y for Transformers) OR has animation/family tags, let it through!
+  if (!hasSafeCert && !hasKidsTags) {
+    return { exclude: true, reason: "Excluded: Lacks kids certification or family/animation genres" };
+  }
+
+  return { exclude: false, reason: `Passed validation (Cert: ${certification || 'None'}, Genres: ${allGenres.join(', ')})` };
 }
 
 async function findTmdbId(show) {
@@ -135,7 +150,7 @@ async function build() {
   const activeShowIds = new Set();
   const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
   
-  console.log(`Starting strict kids schedule analysis...`);
+  console.log(`Pulling schedule from TVMaze API...`);
 
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
@@ -151,6 +166,14 @@ async function build() {
         });
       }
     }
+
+    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
+    if (Array.isArray(webList)) {
+      webList.forEach(ep => {
+        const show = ep.show || (ep._embedded && ep._embedded.show);
+        if (show?.id) activeShowIds.add(show.id);
+      });
+    }
   }
 
   console.log(`Processing metadata mappings for ${activeShowIds.size} shows...`);
@@ -161,9 +184,9 @@ async function build() {
     if (!showData) continue;
 
     const tmdbId = await findTmdbId(showData);
-    const certification = await getTmdbCertification(tmdbId);
+    const tmdbData = await getTmdbDetails(tmdbId);
 
-    const audit = evaluateExclusion(showData, certification);
+    const audit = evaluateExclusion(showData, tmdbData);
     if (audit.exclude) {
       auditLogs.push({ name: showData.name, type: showData.type, status: "DROPPED", detail: audit.reason });
       continue;
@@ -187,8 +210,8 @@ async function build() {
       tvmazeId: showData.id,
       type: "series",
       name: showData.name,
-      genres: showData.genres || [],
-      certification: certification || undefined,
+      genres: [...new Set([...showData.genres, ...tmdbData.genres])],
+      certification: tmdbData.certification || undefined,
       year: showData.premiered ? showData.premiered.split("-")[0] : undefined,
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
@@ -223,7 +246,7 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            STRICT KIDS PIPELINE REPORT                                         ");
+  console.log("            TVMAZE + TMDB CERTIFICATION & GENRE REPORT                          ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
