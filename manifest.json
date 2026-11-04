@@ -1,0 +1,23 @@
+{
+  "id": "com.yourname.tvmaze.weekly",
+  "version": "1.0.0",
+  "name": "TVMaze Weekly Schedule",
+  "description": "Self-hosted TVMaze catalog with full metadata override",
+  "types": ["series"],
+  "idPrefixes": ["tvmaze"],
+  "resources": [
+    "catalog",
+    {
+      "name": "meta",
+      "types": ["series"],
+      "idPrefixes": ["tvmaze"]
+    }
+  ],
+  "catalogs": [
+    {
+      "type": "series",
+      "id": "tvmaze_weekly_schedule",
+      "name": "Weekly Schedule"
+    }
+  ]
+}
