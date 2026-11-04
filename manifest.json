@@ -1,7 +1,7 @@
 {
-  "id": "com.yourname.tvmaze.weekly",
+  "id": "com.kids.tvmaze.weekly",
   "version": "1.0.0",
-  "name": "TVMaze Weekly Schedule",
+  "name": "TVMaze Weekly Kids Schedule",
   "description": "Self-hosted TVMaze catalog with full metadata override",
   "types": ["series"],
   "idPrefixes": ["tvmaze"],
@@ -16,8 +16,8 @@
   "catalogs": [
     {
       "type": "series",
-      "id": "tvmaze_weekly_schedule",
-      "name": "Weekly Schedule"
+      "id": "tvmaze_weekly_kids_schedule",
+      "name": "Weekly Kids Schedule"
     }
   ]
 }
