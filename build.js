@@ -1,5 +1,7 @@
 /**
- * build.js — Stremio & Wako Kids/Family Weekly Schedule (TMDB Discover Direct)
+ * build.js — Stremio & Wako Kids Weekly Schedule
+ * Discovery & Episode Map: TVMaze
+ * Filtering & Metadata: TMDB Content Ratings
  */
 
 import fs from "fs";
@@ -10,13 +12,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const DISCOVERY_DAYS_BACK = 30; // 30-day discovery window
-const RETENTION_DAYS_BACK = 9;  // 9-day retention window for final catalog
+const DISCOVERY_DAYS_BACK = 12; 
+const RETENTION_DAYS_BACK = 9;
+
+const TMDB_ID_OVERRIDES = {};
+const TVMAZE_DELAY_MS = 250; 
+let lastTvmazeCall = 0;
 
 const auditLogs = [];
 
 async function fetchJSON(url) {
   try {
+    if (url.includes("api.tvmaze.com")) {
+      const wait = Math.max(0, TVMAZE_DELAY_MS - (Date.now() - lastTvmazeCall));
+      if (wait) await new Promise(r => setTimeout(r, wait));
+      lastTvmazeCall = Date.now();
+    }
     const res = await fetch(url);
     return res.ok ? await res.json() : null;
   } catch { return null; }
@@ -50,134 +61,163 @@ function getLatestValidDate(show, todayStr) {
   return maxDate;
 }
 
-async function getTmdbShowDetails(tmdbId, country = "US") {
+/**
+ * Fetch full show metadata, certifications, and external IDs from TMDB
+ */
+async function getTmdbMetadata(tmdbId, country = "US") {
+  if (!tmdbId) return null;
+  
   const [details, ratingsData, externalIds] = await Promise.all([
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`),
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`),
     fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`)
   ]);
 
+  if (!details) return null;
+
   const ratingObj = ratingsData?.results?.find(r => r.iso_3166_1 === country) || ratingsData?.results?.[0];
-  const certification = ratingObj ? ratingObj.rating : null;
   
   return {
     details,
-    certification,
+    certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: details?.genres ? details.genres.map(g => g.name.toLowerCase()) : []
+    genres: details.genres ? details.genres.map(g => g.name) : []
   };
 }
 
-async function build() {
-  const todayStr = pacificDateString(new Date());
-  
-  const startDateObj = new Date();
-  startDateObj.setDate(startDateObj.getDate() - DISCOVERY_DAYS_BACK);
-  const startDateStr = pacificDateString(startDateObj);
+function evaluateExclusion(showData, tmdbMeta) {
+  const name = (showData.name || "").toLowerCase();
 
-  console.log(`Discovering kids/family shows on TMDB between ${startDateStr} and ${todayStr}...`);
+  // 1. Explicit title blocklist guardrails (adult reality, soaps, news)
+  const blockedTitles = [
+    "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
+    "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
+    "young and the restless", "bold and the beautiful", "days of our lives", "general hospital"
+  ];
+  if (blockedTitles.some(title => name.includes(title))) {
+    return { exclude: true, reason: `Excluded: Adult title blocklist (${showData.name})` };
+  }
 
-  let discoverResults = [];
+  // If TMDB metadata is missing completely, default safely
+  if (!tmdbMeta) {
+    return { exclude: true, reason: "Excluded: Could not map to TMDB" };
+  }
 
-  // Query pages 1 through 5 using TMDB Discover
-  // with_status=0|3|4 catches Returning (0), Ended (3), and Canceled (4) shows
-  // with_genres=10762|16 targets Kids (10762) and Animation (16)
-  for (let page = 1; page <= 5; page++) {
-    const url = `https://api.themoviedb.org/3/discover/tv` +
-      `?api_key=${TMDB_API_KEY}` +
-      `&air_date.gte=${startDateStr}` +
-      `&air_date.lte=${todayStr}` +
-      `&with_genres=10762|16` +
-      `&with_status=0|3|4` +
-      `&timezone=America/Los_Angeles` +
-      `&sort_by=popularity.desc` +
-      `&page=${page}`;
+  const { certification } = tmdbMeta;
 
-    const data = await fetchJSON(url);
-    if (data?.results?.length) {
-      discoverResults.push(...data.results);
+  // 2. TMDB Certification Gatekeeper (PG & Below, including C8, TV-Y, TV-Y7, TV-G, G, TV-PG, PG)
+  const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
+  const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17", "14+", "18+"];
+
+  if (certification) {
+    const certUpper = certification.toUpperCase();
+    
+    if (blockedCertifications.includes(certUpper)) {
+      return { exclude: true, reason: `Excluded: Mature TMDB certification '${certification}'` };
+    }
+
+    if (!allowedCertifications.includes(certUpper)) {
+      return { exclude: true, reason: `Excluded: Unrecognized certification '${certification}'` };
     }
   }
 
-  const uniqueShows = Array.from(new Map(discoverResults.map(show => [show.id, show])).values());
-  console.log(`Found ${uniqueShows.length} potential shows via TMDB Discover. Processing full series episode maps...`);
+  return { exclude: false, reason: `Passed TMDB certification: ${certification || 'Unrated PG-Safe'}` };
+}
 
-  const metas = [];
+async function findTmdbId(show) {
+  if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
+
+  const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const targetNormalized = normalizeTitle(show.name);
   
-  for (const rawShow of uniqueShows) {
-    const { details, certification, imdbId, genres } = await getTmdbShowDetails(rawShow.id);
-    if (!details) continue;
+  const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
+  if (!search?.results?.length) return null;
 
-    const name = (details.name || "").toLowerCase();
+  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
+  return matchingResults.length > 0 ? matchingResults[0].id : search.results[0].id;
+}
 
-    // 1. Explicit title blocklist guardrails
-    const blockedTitles = [
-      "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
-      "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians"
-    ];
-    if (blockedTitles.some(title => name.includes(title))) {
-      auditLogs.push({ name: details.name, status: "DROPPED", detail: "Matched title blocklist" });
-      continue;
-    }
+async function build() {
+  const activeShowIds = new Set();
+  const targetCountries = ["US", "GB", "CA", "AU", "NZ"];
+  
+  console.log(`Pulling active schedule list from TVMaze...`);
 
-    // 2. Age Certification Check (PG & Below, including international equivalents like C, C8)
-    const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
-    const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17", "14+", "18+"];
-
-    if (certification) {
-      const certUpper = certification.toUpperCase();
-      if (blockedCertifications.includes(certUpper)) {
-        auditLogs.push({ name: details.name, status: "DROPPED", detail: `Blocked Certification (${certification})` });
-        continue;
-      }
-      if (!allowedCertifications.includes(certUpper)) {
-        auditLogs.push({ name: details.name, status: "DROPPED", detail: `Unrecognized Certification (${certification})` });
-        continue;
-      }
-    }
-
-    // 3. Map ALL seasons and episodes for Stremio video structure
-    const seasons = details.seasons || [];
-    const mappedVideos = [];
-
-    for (const season of seasons) {
-      if (season.season_number < 0) continue; // Skip specials if not needed
-      const seasonData = await fetchJSON(`https://api.themoviedb.org/3/tv/${details.id}/season/${season.season_number}?api_key=${TMDB_API_KEY}`);
-      
-      if (seasonData?.episodes) {
-        seasonData.episodes.forEach(ep => {
-          if (ep.air_date) {
-            mappedVideos.push({
-              released: ep.air_date,
-              season: Number(season.season_number),
-              episode: Number(ep.episode_number)
-            });
-          }
+  for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const dateStr = pacificDateString(d);
+    
+    for (const country of targetCountries) {
+      const broadcastList = await fetchJSON(`https://api.tvmaze.com/schedule?country=${country}&date=${dateStr}`);
+      if (Array.isArray(broadcastList)) {
+        broadcastList.forEach(ep => {
+          const show = ep.show || (ep._embedded && ep._embedded.show);
+          if (show?.id) activeShowIds.add(show.id);
         });
       }
     }
 
-    let stremioId = `tmdb:${details.id}`;
+    const webList = await fetchJSON(`https://api.tvmaze.com/schedule/web?date=${dateStr}`);
+    if (Array.isArray(webList)) {
+      webList.forEach(ep => {
+        const show = ep.show || (ep._embedded && ep._embedded.show);
+        if (show?.id) activeShowIds.add(show.id);
+      });
+    }
+  }
+
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Processing TMDB metadata & certifications...`);
+
+  const metas = [];
+  for (const showId of activeShowIds) {
+    const showData = await fetchJSON(`https://api.tvmaze.com/shows/${showId}?embed=episodes`);
+    if (!showData) continue;
+
+    const tmdbId = await findTmdbId(showData);
+    const tmdbMeta = await getTmdbMetadata(tmdbId);
+
+    const audit = evaluateExclusion(showData, tmdbMeta);
+    if (audit.exclude) {
+      auditLogs.push({ name: showData.name, status: "DROPPED", detail: audit.reason });
+      continue;
+    }
+    
+    const imdbId = tmdbMeta?.imdbId || showData.externals?.imdb || null;
+    let stremioId = (tmdbId ? `tmdb:${tmdbId}` : null) || (imdbId ? `imdb:${imdbId}` : `tvmaze:${showData.id}`);
+
+    // TVMaze delivers complete season/episode mapping for Stremio
+    const mappedVideos = (showData._embedded?.episodes || [])
+      .sort((a, b) => (a.season - b.season) || (a.number - b.number))
+      .map(ep => ({
+        released: ep.airdate || (ep.airstamp ? ep.airstamp.split('T')[0] : null),
+        season: Number(ep.season || 1),
+        episode: Number(ep.number || 0)
+      }));
+
+    // Build meta payload prioritizing TMDB metadata/assets over TVMaze defaults
+    const tmdbDetails = tmdbMeta.details;
 
     metas.push({
       id: stremioId,
       imdb_id: imdbId || undefined,
-      tmdb_id: details.id,
+      tmdb_id: tmdbId || undefined,
+      tvmazeId: showData.id,
       type: "series",
-      name: details.name,
-      genres: genres,
-      certification: certification || undefined,
-      year: details.first_air_date ? details.first_air_date.split("-")[0] : undefined,
-      description: cleanHTML(details.overview),
-      poster: details.poster_path ? `https://image.tmdb.org/t/p/original${details.poster_path}` : null,
-      background: details.backdrop_path ? `https://image.tmdb.org/t/p/original${details.backdrop_path}` : null,
-      videos: mappedVideos
+      name: tmdbDetails.name || showData.name,
+      genres: tmdbMeta.genres.length > 0 ? tmdbMeta.genres : showData.genres,
+      certification: tmdbMeta.certification || undefined,
+      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : (showData.premiered ? showData.premiered.split("-")[0] : undefined),
+      description: tmdbDetails.overview || cleanHTML(showData.summary),
+      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : (showData.image?.original || null),
+      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : (showData.image?.original || null),
+      videos: mappedVideos 
     });
 
-    auditLogs.push({ name: details.name, status: "KEPT", detail: `Cert: ${certification || 'N/A'}, Episodes: ${mappedVideos.length}` });
+    auditLogs.push({ name: showData.name, status: "KEPT", detail: audit.reason });
   }
 
-  // Retention Window Filtering: Keep only shows that aired an episode within the last RETENTION_DAYS_BACK days
+  const todayStr = pacificDateString(new Date());
   const cutoffTarget = new Date();
   cutoffTarget.setDate(cutoffTarget.getDate() - RETENTION_DAYS_BACK);
   const cutoffStr = pacificDateString(cutoffTarget);
@@ -187,19 +227,27 @@ async function build() {
     return latest >= cutoffStr && latest <= todayStr;
   });
 
-  // Strip heavy video arrays before writing out final catalog file
-  filteredMetas.forEach(show => { delete show.videos; });
+  const uniqueMetasMap = new Map();
+  filteredMetas.forEach(show => {
+    if (uniqueMetasMap.has(show.id)) show.id = `tvmaze-fallback:${show.tvmazeId}`;
+    uniqueMetasMap.set(show.id, show);
+  });
+
+  const finalMetas = Array.from(uniqueMetasMap.values());
+  finalMetas.sort((a, b) => getLatestValidDate(b, todayStr).localeCompare(getLatestValidDate(a, todayStr)));
+
+  finalMetas.forEach(show => { delete show.videos; });
 
   if (!fs.existsSync(CATALOG_DIR)) fs.mkdirSync(CATALOG_DIR, { recursive: true });
   const filePath = path.join(CATALOG_DIR, "tvmaze_kids_weekly_schedule.json");
-  fs.writeFileSync(filePath, JSON.stringify({ metas: filteredMetas }, null, 2));
+  fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            TMDB DISCOVER (ACTIVE + ENDED + CANCELED) REPORT                     ");
+  console.log("            TVMAZE SCHEDULE + TMDB METADATA REPORT                              ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${filteredMetas.length} shows in the kids weekly catalog.`);
+  console.log(`Successfully generated ${finalMetas.length} shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
