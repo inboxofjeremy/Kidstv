@@ -67,7 +67,6 @@ async function getTmdbCertification(tmdbId, country = "US") {
   const data = await fetchJSON(`https://api.themoviedb.org/3/tv/${tmdbId}/content_ratings?api_key=${TMDB_API_KEY}`);
   if (!data?.results) return null;
 
-  // Find country rating (defaults to US rating)
   const ratingObj = data.results.find(r => r.iso_3166_1 === country) || data.results[0];
   return ratingObj ? ratingObj.rating : null;
 }
@@ -80,7 +79,20 @@ function evaluateExclusion(show, certification) {
   const webChannel = (show.webChannel?.name || "").toLowerCase();
   const network = (show.network?.name || "").toLowerCase();
 
-  // 1. Check age certification/ratings if TMDB provided one
+  // 1. Explicitly block adult reality, competition, soap operas, talk, and late-night franchises
+  const blockedTitles = [
+    "dancing with the stars", "strictly come dancing", "survivor", "masked singer", 
+    "big brother", "the bachelor", "the bachelorette", "love island", "masterchef", 
+    "the voice", "americas got talent", "britains got talent", "rupaul", "shark tank", 
+    "top chef", "the amazing race", "american idol", "the kardashians", 
+    "young and the restless", "bold and the beautiful", "days of our lives", 
+    "general hospital", "beyond the gates", "assisted living", "smosh"
+  ];
+  if (blockedTitles.some(title => name.includes(title))) {
+    return { exclude: true, reason: `Excluded: Adult/Soap/Reality Franchise (${show.name})` };
+  }
+
+  // 2. Enforce strict age certification rules
   const allowedCertifications = ["TV-Y", "TV-Y7", "TV-G", "TV-PG", "G", "PG"];
   const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17"];
 
@@ -91,7 +103,7 @@ function evaluateExclusion(show, certification) {
     }
   }
 
-  // 2. Block unwanted non-kids genres/formats
+  // 3. Block unwanted formats (news, sports, documentaries)
   const blockedLanguages = ["chinese", "japanese", "russian", "mandarin", "cantonese", "korean", "hindi", "thai", "spanish", "norwegian", "hungarian", "dutch", "swedish", "portuguese", "urdu", "turkish", "hebrew"];
   if (blockedLanguages.includes(lang)) {
     return { exclude: true, reason: `Blocked Language (${lang})` };
@@ -103,8 +115,12 @@ function evaluateExclusion(show, certification) {
     return { exclude: true, reason: "Excluded: Pure Documentary" };
   }
 
-  // 3. Confirm kids/family content attributes
-  const kidsKeywords = ["kids", "children", "cartoon", "disney", "nickelodeon", "cartoon network", "lego", "barbie", "pokemon", "paw patrol", "peppa pig", "mickey", "sesame street"];
+  // 4. Strict Kids/Family Check
+  const kidsKeywords = [
+    "kids", "children", "cartoon", "disney", "nickelodeon", "cartoon network", 
+    "lego", "barbie", "pokemon", "paw patrol", "peppa pig", "mickey", "sesame street", 
+    "cbeebies", "bluey", "chibi", "sunny bunnies"
+  ];
   const allowedGenres = ["animation", "family", "children", "anime"];
 
   const hasKidsGenre = genres.some(g => allowedGenres.includes(g));
@@ -112,7 +128,7 @@ function evaluateExclusion(show, certification) {
   const hasSafeCert = certification && allowedCertifications.includes(certification.toUpperCase());
 
   if (!hasKidsGenre && !hasKidsKeyword && !hasSafeCert) {
-    return { exclude: true, reason: "Excluded: Not identified as Kids/Family content" };
+    return { exclude: true, reason: "Excluded: Lacks confirmed Kids/Family markers or rating" };
   }
 
   return { exclude: false, reason: "Passed Kids/Family validation rules" };
@@ -256,7 +272,7 @@ async function build() {
       type: "series",
       name: showData.name,
       genres: showData.genres || [],
-      certification: certification || undefined, // Stremio metadata property
+      certification: certification || undefined,
       year: showData.premiered ? showData.premiered.split("-")[0] : undefined,
       description: cleanHTML(showData.summary),
       poster: showData.image?.original || showData.image?.medium || null,
