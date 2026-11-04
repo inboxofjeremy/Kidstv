@@ -11,6 +11,13 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
+// Guardrail: Ensure TMDB API Key is present before attempting execution
+if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
+  console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!");
+  console.error("Please export your API key before running: export TMDB_API_KEY='your_key_here'\n");
+  process.exit(1);
+}
+
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
 const DISCOVERY_DAYS_BACK = 12; 
 const RETENTION_DAYS_BACK = 9;
@@ -29,8 +36,16 @@ async function fetchJSON(url) {
       lastTvmazeCall = Date.now();
     }
     const res = await fetch(url);
-    return res.ok ? await res.json() : null;
-  } catch { return null; }
+    if (!res.ok) {
+      if (url.includes("api.themoviedb.org")) {
+        console.warn(`[TMDB API Error] Status ${res.status} for URL: ${url}`);
+      }
+      return null;
+    }
+    return await res.json();
+  } catch (err) { 
+    return null; 
+  }
 }
 
 const cleanHTML = s => s ? s.replace(/<[^>]+>/g, "").trim() : "";
@@ -67,18 +82,20 @@ async function findTmdbId(show) {
   // 1. Strict Match via External IMDb ID
   if (show.externals?.imdb) {
     let rawImdb = String(show.externals.imdb).trim();
-    const imdbId = rawImdb.startsWith('tt') ? rawImdb : `tt${rawImdb.padStart(7, '0')}`;
+    if (rawImdb.length > 0) {
+      const imdbId = rawImdb.startsWith('tt') ? rawImdb : `tt${rawImdb.padStart(7, '0')}`;
+        
+      const findRes = await fetchJSON(
+        `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+      );
       
-    const findRes = await fetchJSON(
-      `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
-    );
-    
-    if (findRes?.tv_results?.length > 0) {
-      return findRes.tv_results[0].id;
+      if (findRes?.tv_results?.length > 0) {
+        return findRes.tv_results[0].id;
+      }
     }
   }
 
-  // 2. Strict Match via Exact Title Comparison
+  // 2. Strict Match via Exact Title Comparison (Case & Special Char Insensitive)
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const cleanTitle = (show.name || "").replace(/\s*\(\d{4}\)\s*/g, "").trim();
   const targetNormalized = normalizeTitle(cleanTitle);
