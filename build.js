@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako Kids Weekly Schedule
  * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Content Ratings
+ * Filtering & Metadata: TMDB Content Ratings (Strict ID / Exact Title Matching)
  */
 
 import fs from "fs";
@@ -61,9 +61,43 @@ function getLatestValidDate(show, todayStr) {
   return maxDate;
 }
 
-/**
- * Fetch full show metadata, certifications, and external IDs from TMDB
- */
+async function findTmdbId(show) {
+  if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
+
+  // 1. Strict Match via External IMDb ID
+  if (show.externals?.imdb) {
+    const imdbId = show.externals.imdb.startsWith('tt') 
+      ? show.externals.imdb 
+      : `tt${show.externals.imdb}`;
+      
+    const findRes = await fetchJSON(
+      `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+    );
+    
+    if (findRes?.tv_results?.length > 0) {
+      return findRes.tv_results[0].id;
+    }
+  }
+
+  // 2. Strict Match via Exact Title Comparison (No Fuzzy Guessing)
+  const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
+  const cleanTitle = (show.name || "").replace(/\s*\(\d{4}\)\s*/g, "").trim();
+  const targetNormalized = normalizeTitle(cleanTitle);
+
+  const search = await fetchJSON(
+    `https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(cleanTitle)}`
+  );
+  
+  if (search?.results?.length > 0) {
+    const exactMatch = search.results.find(r => normalizeTitle(r.name) === targetNormalized);
+    if (exactMatch) {
+      return exactMatch.id;
+    }
+  }
+
+  return null;
+}
+
 async function getTmdbMetadata(tmdbId, country = "US") {
   if (!tmdbId) return null;
   
@@ -88,7 +122,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 function evaluateExclusion(showData, tmdbMeta) {
   const name = (showData.name || "").toLowerCase();
 
-  // 1. Explicit title blocklist guardrails (adult reality, soaps, news)
+  // 1. Adult title blocklist guardrails
   const blockedTitles = [
     "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
     "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
@@ -98,9 +132,9 @@ function evaluateExclusion(showData, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Adult title blocklist (${showData.name})` };
   }
 
-  // If TMDB metadata is missing completely, default safely
+  // Drop if TMDB lookup fails exact match
   if (!tmdbMeta) {
-    return { exclude: true, reason: "Excluded: Could not map to TMDB" };
+    return { exclude: true, reason: "Excluded: Missing exact IMDb/Title match in TMDB" };
   }
 
   const { certification } = tmdbMeta;
@@ -122,19 +156,6 @@ function evaluateExclusion(showData, tmdbMeta) {
   }
 
   return { exclude: false, reason: `Passed TMDB certification: ${certification || 'Unrated PG-Safe'}` };
-}
-
-async function findTmdbId(show) {
-  if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
-
-  const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
-  const targetNormalized = normalizeTitle(show.name);
-  
-  const search = await fetchJSON(`https://api.themoviedb.org/3/search/tv?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(show.name)}`);
-  if (!search?.results?.length) return null;
-
-  const matchingResults = search.results.filter(r => normalizeTitle(r.name) === targetNormalized);
-  return matchingResults.length > 0 ? matchingResults[0].id : search.results[0].id;
 }
 
 async function build() {
@@ -167,7 +188,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Processing TMDB metadata & certifications...`);
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict ID/Exact-Title TMDB checks...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -186,7 +207,6 @@ async function build() {
     const imdbId = tmdbMeta?.imdbId || showData.externals?.imdb || null;
     let stremioId = (tmdbId ? `tmdb:${tmdbId}` : null) || (imdbId ? `imdb:${imdbId}` : `tvmaze:${showData.id}`);
 
-    // TVMaze delivers complete season/episode mapping for Stremio
     const mappedVideos = (showData._embedded?.episodes || [])
       .sort((a, b) => (a.season - b.season) || (a.number - b.number))
       .map(ep => ({
@@ -195,7 +215,6 @@ async function build() {
         episode: Number(ep.number || 0)
       }));
 
-    // Build meta payload prioritizing TMDB metadata/assets over TVMaze defaults
     const tmdbDetails = tmdbMeta.details;
 
     metas.push({
@@ -243,7 +262,7 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            TVMAZE SCHEDULE + TMDB METADATA REPORT                              ");
+  console.log("            STRICT ID & TITLE MATCHING REPORT                                   ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
