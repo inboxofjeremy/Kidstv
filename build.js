@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako Kids Weekly Schedule
  * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Content Ratings (Strict ID / Exact Title Matching)
+ * Filtering & Metadata: TMDB Content Ratings (Strict Safe-Certification Enforcement)
  */
 
 import fs from "fs";
@@ -11,10 +11,8 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-// Guardrail: Ensure TMDB API Key is present before attempting execution
 if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
-  console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!");
-  console.error("Please export your API key before running: export TMDB_API_KEY='your_key_here'\n");
+  console.error("\n❌ ERROR: TMDB_API_KEY environment variable is not defined or is empty!\n");
   process.exit(1);
 }
 
@@ -36,16 +34,8 @@ async function fetchJSON(url) {
       lastTvmazeCall = Date.now();
     }
     const res = await fetch(url);
-    if (!res.ok) {
-      if (url.includes("api.themoviedb.org")) {
-        console.warn(`[TMDB API Error] Status ${res.status} for URL: ${url}`);
-      }
-      return null;
-    }
-    return await res.json();
-  } catch (err) { 
-    return null; 
-  }
+    return res.ok ? await res.json() : null;
+  } catch { return null; }
 }
 
 const cleanHTML = s => s ? s.replace(/<[^>]+>/g, "").trim() : "";
@@ -79,23 +69,19 @@ function getLatestValidDate(show, todayStr) {
 async function findTmdbId(show) {
   if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
 
-  // 1. Strict Match via External IMDb ID
   if (show.externals?.imdb) {
     let rawImdb = String(show.externals.imdb).trim();
     if (rawImdb.length > 0) {
       const imdbId = rawImdb.startsWith('tt') ? rawImdb : `tt${rawImdb.padStart(7, '0')}`;
-        
       const findRes = await fetchJSON(
         `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
       );
-      
       if (findRes?.tv_results?.length > 0) {
         return findRes.tv_results[0].id;
       }
     }
   }
 
-  // 2. Strict Match via Exact Title Comparison (Case & Special Char Insensitive)
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const cleanTitle = (show.name || "").replace(/\s*\(\d{4}\)\s*/g, "").trim();
   const targetNormalized = normalizeTitle(cleanTitle);
@@ -134,7 +120,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: details.genres ? details.genres.map(g => g.name) : []
+    genres: details.genres ? details.genres.map(g => g.name.toLowerCase()) : []
   };
 }
 
@@ -151,30 +137,33 @@ function evaluateExclusion(showData, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Adult title blocklist (${showData.name})` };
   }
 
-  // Drop if TMDB lookup fails exact match
   if (!tmdbMeta) {
     return { exclude: true, reason: "Excluded: Missing exact IMDb/Title match in TMDB" };
   }
 
-  const { certification } = tmdbMeta;
+  const { certification, genres } = tmdbMeta;
 
-  // 2. TMDB Certification Gatekeeper (PG & Below, including C8, TV-Y, TV-Y7, TV-G, G, TV-PG, PG)
+  // 2. Strict Safe-Certification Whitelist (No unrated defaults allowed)
   const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
-  const blockedCertifications = ["TV-14", "TV-MA", "R", "NC-17", "14+", "18+"];
-
-  if (certification) {
-    const certUpper = certification.toUpperCase();
-    
-    if (blockedCertifications.includes(certUpper)) {
-      return { exclude: true, reason: `Excluded: Mature TMDB certification '${certification}'` };
-    }
-
-    if (!allowedCertifications.includes(certUpper)) {
-      return { exclude: true, reason: `Excluded: Unrecognized certification '${certification}'` };
-    }
+  
+  if (!certification) {
+    return { exclude: true, reason: "Excluded: Missing official age certification on TMDB" };
   }
 
-  return { exclude: false, reason: `Passed TMDB certification: ${certification || 'Unrated PG-Safe'}` };
+  const certUpper = certification.toUpperCase();
+  if (!allowedCertifications.includes(certUpper)) {
+    return { exclude: true, reason: `Excluded: Unallowed certification '${certification}'` };
+  }
+
+  // 3. Double-check genre safety gate (must include animation, family, or kids genres)
+  const safeGenres = ["animation", "family", "children", "kids", "anime"];
+  const hasSafeGenre = genres.some(g => safeGenres.includes(g));
+  
+  if (!hasSafeGenre && !["tv-y", "tv-y7", "tv-y7-fv", "c", "c8"].includes(certUpper)) {
+    return { exclude: true, reason: `Excluded: Lacks kids/family genre tag (Genres: ${genres.join(', ') || 'none'})` };
+  }
+
+  return { exclude: false, reason: `Passed certification & genre check (${certification})` };
 }
 
 async function build() {
@@ -207,7 +196,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict ID/Exact-Title TMDB checks...`);
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict certification checks...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -243,12 +232,12 @@ async function build() {
       tvmazeId: showData.id,
       type: "series",
       name: tmdbDetails.name || showData.name,
-      genres: tmdbMeta.genres.length > 0 ? tmdbMeta.genres : showData.genres,
+      genres: tmdbMeta.genres,
       certification: tmdbMeta.certification || undefined,
-      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : (showData.premiered ? showData.premiered.split("-")[0] : undefined),
+      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : undefined,
       description: tmdbDetails.overview || cleanHTML(showData.summary),
-      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : (showData.image?.original || null),
-      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : (showData.image?.original || null),
+      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : null,
+      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : null,
       videos: mappedVideos 
     });
 
@@ -281,11 +270,11 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            STRICT ID & TITLE MATCHING REPORT                                   ");
+  console.log("            STRICT SAFE-CERTIFICATION ENFORCEMENT REPORT                        ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${finalMetas.length} shows in the catalog.`);
+  console.log(`Successfully generated ${finalMetas.length} safe shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
