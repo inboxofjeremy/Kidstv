@@ -1,6 +1,7 @@
 /**
  * build.js — TMDB Daily Kids Discover (9-Day Window)
  * Generates static JSON for GitHub Pages directly from TMDB air dates.
+ * Strictly filters for English-language kids content.
  */
 
 import fs from "fs";
@@ -56,14 +57,26 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: details.genres ? details.genres.map(g => g.name) : []
+    genres: details.genres ? details.genres.map(g => g.name) : [],
+    originalLanguage: details.original_language
   };
 }
 
-function evaluateExclusion(showName, genres) {
+function evaluateExclusion(showName, tmdbMeta) {
   const name = (showName || "").toLowerCase();
 
-  // Core title blocklist
+  // 1. Language Check: Strictly enforce English original language
+  if (tmdbMeta.originalLanguage && tmdbMeta.originalLanguage !== "en") {
+    return { exclude: true, reason: `Excluded: Non-English original language ('${tmdbMeta.originalLanguage}')` };
+  }
+
+  // 2. Non-Latin / Foreign Character Check (e.g., Chinese, Japanese, Korean, Cyrillic)
+  const nonEnglishCharRegex = /[\u4e00-\u9fa5\u3040-\u30ff\u3130-\u318f\u0400-\u04ff]/;
+  if (nonEnglishCharRegex.test(showName)) {
+    return { exclude: true, reason: `Excluded: Contains foreign script/characters (${showName})` };
+  }
+
+  // 3. Core Title Blocklist
   const blockedTitles = [
     "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
     "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
@@ -73,8 +86,9 @@ function evaluateExclusion(showName, genres) {
     return { exclude: true, reason: `Excluded: Blocklisted title (${showName})` };
   }
 
-  // Double-check genre array contains kids or children
-  const hasValidGenre = (genres || []).some(g => {
+  // 4. Genre Check for Kids / Children
+  const genres = tmdbMeta.genres || [];
+  const hasValidGenre = genres.some(g => {
     const genreLower = String(g).toLowerCase();
     return genreLower.includes("kids") || genreLower.includes("children");
   });
@@ -83,21 +97,21 @@ function evaluateExclusion(showName, genres) {
     return { exclude: true, reason: `Excluded: Lacks 'kids' or 'children' genre (Genres: ${genres.join(', ') || 'none'})` };
   }
 
-  return { exclude: false, reason: `Passed kids genre check` };
+  return { exclude: false, reason: `Passed kids genre & language check` };
 }
 
 async function build() {
   const discoveredShows = new Map(); // tmdbId -> latestAirDate
 
-  console.log(`Discovering shows from TMDB for the past ${RETENTION_DAYS_BACK} days...`);
+  console.log(`Discovering English kids shows from TMDB for the past ${RETENTION_DAYS_BACK} days...`);
 
-  // Query TMDB Discover for each of the last 9 days filtered explicitly by Kids genre (10762)
+  // Query TMDB Discover for each day, filtered by Kids genre (10762) AND English language (with_original_language=en)
   for (let i = 0; i < RETENTION_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
 
-    const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_genres=${TMDB_KIDS_GENRE_ID}&sort_by=popularity.desc`;
+    const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_genres=${TMDB_KIDS_GENRE_ID}&with_original_language=en&sort_by=popularity.desc`;
     const data = await fetchJSON(discoverUrl);
 
     if (data?.results) {
@@ -109,7 +123,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${discoveredShows.size} unique kids shows airing in the last 9 days. Processing metadata...`);
+  console.log(`Discovered ${discoveredShows.size} unique English kids shows airing in the last 9 days. Processing metadata...`);
 
   const metas = [];
   for (const [tmdbId, latestAirDate] of discoveredShows.entries()) {
@@ -117,7 +131,7 @@ async function build() {
     if (!tmdbMeta) continue;
 
     const showName = tmdbMeta.details.name;
-    const audit = evaluateExclusion(showName, tmdbMeta.genres);
+    const audit = evaluateExclusion(showName, tmdbMeta);
     
     if (audit.exclude) {
       auditLogs.push({ name: showName, status: "DROPPED", detail: audit.reason });
@@ -155,11 +169,11 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            TMDB DAILY KIDS DISCOVERY REPORT                                     ");
+  console.log("            TMDB DAILY KIDS DISCOVERY REPORT (ENGLISH ONLY)                      ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${metas.length} kids shows in the catalog.`);
+  console.log(`Successfully generated ${metas.length} English kids shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
