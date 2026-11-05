@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako Kids Weekly Schedule
  * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Content Ratings (Strict Safe-Certification Enforcement)
+ * Filtering & Metadata: TMDB Content Ratings (Strict Kids-Only Genres)
  */
 
 import fs from "fs";
@@ -69,6 +69,7 @@ function getLatestValidDate(show, todayStr) {
 async function findTmdbId(show) {
   if (TMDB_ID_OVERRIDES[show.id]) return TMDB_ID_OVERRIDES[show.id];
 
+  // 1. Strict Match via External IMDb ID
   if (show.externals?.imdb) {
     let rawImdb = String(show.externals.imdb).trim();
     if (rawImdb.length > 0) {
@@ -82,6 +83,7 @@ async function findTmdbId(show) {
     }
   }
 
+  // 2. Strict Match via Exact Title Comparison
   const normalizeTitle = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "").trim();
   const cleanTitle = (show.name || "").replace(/\s*\(\d{4}\)\s*/g, "").trim();
   const targetNormalized = normalizeTitle(cleanTitle);
@@ -127,14 +129,15 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 function evaluateExclusion(showData, tmdbMeta) {
   const name = (showData.name || "").toLowerCase();
 
-  // 1. Adult title blocklist guardrails
+  // 1. Adult, news, talk, soap, and general-family title blocklist
   const blockedTitles = [
     "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
     "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
-    "young and the restless", "bold and the beautiful", "days of our lives", "general hospital"
+    "young and the restless", "bold and the beautiful", "days of our lives", "general hospital",
+    "baking championship", "relative race", "heartland"
   ];
   if (blockedTitles.some(title => name.includes(title))) {
-    return { exclude: true, reason: `Excluded: Adult title blocklist (${showData.name})` };
+    return { exclude: true, reason: `Excluded: Blocklisted title (${showData.name})` };
   }
 
   if (!tmdbMeta) {
@@ -143,27 +146,29 @@ function evaluateExclusion(showData, tmdbMeta) {
 
   const { certification, genres } = tmdbMeta;
 
-  // 2. Strict Safe-Certification Whitelist (No unrated defaults allowed)
+  // 2. Reject general Reality TV or prime-time Drama shows
+  if (genres.includes("reality") || (genres.includes("drama") && !genres.includes("animation"))) {
+    return { exclude: true, reason: `Excluded: Non-kids genre (Genres: ${genres.join(", ")})` };
+  }
+
+  // 3. Strict Kids Genre Requirement (Broad 'family' alone is rejected)
+  const strictKidsGenres = ["animation", "kids", "children", "anime"];
+  const hasKidsGenre = genres.some(g => strictKidsGenres.includes(g));
+
+  if (!hasKidsGenre) {
+    return { exclude: true, reason: `Excluded: Lacks dedicated kids/animation genre (Genres: ${genres.join(", ")})` };
+  }
+
+  // 4. TMDB Certification Gatekeeper (Strictly PG & Below)
   const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
-  
-  if (!certification) {
-    return { exclude: true, reason: "Excluded: Missing official age certification on TMDB" };
+  if (certification) {
+    const certUpper = certification.toUpperCase();
+    if (!allowedCertifications.includes(certUpper)) {
+      return { exclude: true, reason: `Excluded: Unallowed certification '${certification}'` };
+    }
   }
 
-  const certUpper = certification.toUpperCase();
-  if (!allowedCertifications.includes(certUpper)) {
-    return { exclude: true, reason: `Excluded: Unallowed certification '${certification}'` };
-  }
-
-  // 3. Double-check genre safety gate (must include animation, family, or kids genres)
-  const safeGenres = ["animation", "family", "children", "kids", "anime"];
-  const hasSafeGenre = genres.some(g => safeGenres.includes(g));
-  
-  if (!hasSafeGenre && !["tv-y", "tv-y7", "tv-y7-fv", "c", "c8"].includes(certUpper)) {
-    return { exclude: true, reason: `Excluded: Lacks kids/family genre tag (Genres: ${genres.join(', ') || 'none'})` };
-  }
-
-  return { exclude: false, reason: `Passed certification & genre check (${certification})` };
+  return { exclude: false, reason: `Passed strict kids check (${certification || 'Safe'})` };
 }
 
 async function build() {
@@ -196,7 +201,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict certification checks...`);
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict kids filtering...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -234,10 +239,10 @@ async function build() {
       name: tmdbDetails.name || showData.name,
       genres: tmdbMeta.genres,
       certification: tmdbMeta.certification || undefined,
-      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : undefined,
+      year: tmdbDetails.first_air_date ? tmdbDetails.first_air_date.split("-")[0] : (showData.premiered ? showData.premiered.split("-")[0] : undefined),
       description: tmdbDetails.overview || cleanHTML(showData.summary),
-      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : null,
-      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : null,
+      poster: tmdbDetails.poster_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.poster_path}` : (showData.image?.original || null),
+      background: tmdbDetails.backdrop_path ? `https://image.tmdb.org/t/p/original${tmdbDetails.backdrop_path}` : (showData.image?.original || null),
       videos: mappedVideos 
     });
 
@@ -270,11 +275,11 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            STRICT SAFE-CERTIFICATION ENFORCEMENT REPORT                        ");
+  console.log("            STRICT KIDS FILTERING REPORT                                         ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${finalMetas.length} safe shows in the catalog.`);
+  console.log(`Successfully generated ${finalMetas.length} safe kids shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
