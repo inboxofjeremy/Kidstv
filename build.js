@@ -1,7 +1,7 @@
 /**
- * build.js — Stremio & Wako Kids Weekly Schedule
- * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Kids/Children Genre Verification
+ * build.js — Automated Stremio & Wako Kids Catalog
+ * Discovery: TVMaze Schedule + Active Show Index (No Hardcoding)
+ * Filtering: TMDB Kids/Children/Animation Genres
  */
 
 import fs from "fs";
@@ -17,8 +17,8 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const DISCOVERY_DAYS_BACK = 12; 
-const RETENTION_DAYS_BACK = 9;
+const DISCOVERY_DAYS_BACK = 14; 
+const RETENTION_DAYS_BACK = 30; // 30-day retention keeps current seasons intact even with minor schedule lags
 
 const TMDB_ID_OVERRIDES = {};
 const TVMAZE_DELAY_MS = 250; 
@@ -53,7 +53,7 @@ function pacificDateString(date = new Date()) {
 
 function getLatestValidDate(show, todayStr) {
   let maxDate = "0000-00-00";
-  if (!show.videos) return maxDate;
+  if (!show.videos || show.videos.length === 0) return maxDate;
   
   for (let i = 0; i < show.videos.length; i++) {
     const d = show.videos[i].released;
@@ -129,7 +129,7 @@ async function getTmdbMetadata(tmdbId, country = "US") {
 function evaluateExclusion(showData, tmdbMeta) {
   const name = (showData.name || "").toLowerCase();
 
-  // 1. Core title blocklist (news, adult talk shows, soap operas)
+  // 1. Title Blocklist for adult programming, news, soap operas
   const blockedTitles = [
     "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
     "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
@@ -143,19 +143,21 @@ function evaluateExclusion(showData, tmdbMeta) {
     return { exclude: true, reason: "Excluded: Missing exact IMDb/Title match in TMDB" };
   }
 
-  const { certification, genres } = tmdbMeta;
+  const { genres } = tmdbMeta;
 
-  // 2. Genre MUST contain "kids" or "children"
-  const hasKidsOrChildrenGenre = (genres || []).some(g => {
+  // 2. Automated Genre Gatekeeper: Must contain "kids", "children", or "animation"
+  const hasValidGenre = (genres || []).some(g => {
     const genreLower = String(g).toLowerCase();
-    return genreLower.includes("kids") || genreLower.includes("children");
+    return genreLower.includes("kids") || 
+           genreLower.includes("children") || 
+           genreLower.includes("animation");
   });
 
-  if (!hasKidsOrChildrenGenre) {
-    return { exclude: true, reason: `Excluded: Genre does not contain 'kids' or 'children' (Genres: ${genres.join(', ') || 'none'})` };
+  if (!hasValidGenre) {
+    return { exclude: true, reason: `Excluded: Genre lacks kids/animation tags (Genres: ${genres.join(', ') || 'none'})` };
   }
 
-  return { exclude: false, reason: `Passed kids genre check (Genres: ${genres.join(', ')})` };
+  return { exclude: false, reason: `Passed genre check (Genres: ${genres.join(', ')})` };
 }
 
 async function build() {
@@ -164,6 +166,7 @@ async function build() {
   
   console.log(`Pulling active schedule list from TVMaze...`);
 
+  // 1. Daily Schedule Discovery
   for (let i = 0; i < DISCOVERY_DAYS_BACK; i++) {
     const d = new Date();
     d.setDate(d.getDate() - i);
@@ -188,7 +191,18 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running genre checks...`);
+  // 2. Automatic Full Index Discovery (Catches non-daily or web-first kids shows)
+  console.log(`Checking TVMaze Show Index pages for ongoing series...`);
+  const indexShows = await fetchJSON(`https://api.tvmaze.com/shows?page=0`);
+  if (Array.isArray(indexShows)) {
+    indexShows.forEach(show => {
+      if (show.status === "Running" || show.status === "In Development") {
+        activeShowIds.add(show.id);
+      }
+    });
+  }
+
+  console.log(`Discovered ${activeShowIds.size} total shows. Filtering automatically via TMDB...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -243,6 +257,8 @@ async function build() {
 
   const filteredMetas = metas.filter(show => {
     const latest = getLatestValidDate(show, todayStr);
+    // If show is actively running on TVMaze, keep it even if TVMaze hasn't updated individual episode dates yet
+    if (latest === "0000-00-00") return true; 
     return latest >= cutoffStr && latest <= todayStr;
   });
 
@@ -262,7 +278,7 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            GENRE-BASED KIDS FILTERING REPORT                                    ");
+  console.log("            FULLY AUTOMATED KIDS CATALOG REPORT                                  ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
