@@ -150,7 +150,7 @@ function evaluateExclusion(showData, tmdbMeta) {
     const genreLower = String(g).toLowerCase();
     return genreLower.includes("kids") || 
            genreLower.includes("children") || 
-           genreLower.includes("animation");
+           
   });
 
   if (!hasValidGenre) {
