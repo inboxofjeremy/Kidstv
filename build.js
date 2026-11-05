@@ -17,7 +17,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const RETENTION_DAYS_BACK = 9;
+const RETENTION_DAYS_BACK = 90;
 const TMDB_KIDS_GENRE_ID = "10762"; // TMDB Official Genre ID for 'Kids'
 
 const auditLogs = [];
