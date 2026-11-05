@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako Kids Weekly Schedule
  * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Content Ratings (Strict Kids-Only Genres)
+ * Filtering & Metadata: TMDB Content Ratings & Kids Genre Verification
  */
 
 import fs from "fs";
@@ -122,19 +122,18 @@ async function getTmdbMetadata(tmdbId, country = "US") {
     details,
     certification: ratingObj ? ratingObj.rating : null,
     imdbId: externalIds?.imdb_id || null,
-    genres: details.genres ? details.genres.map(g => g.name.toLowerCase()) : []
+    genres: details.genres ? details.genres.map(g => g.name) : []
   };
 }
 
 function evaluateExclusion(showData, tmdbMeta) {
   const name = (showData.name || "").toLowerCase();
 
-  // 1. Adult, news, talk, soap, and general-family title blocklist
+  // 1. Core title blocklist (news, adult talk shows, soap operas)
   const blockedTitles = [
     "gma", "news", "hallmark", "dancing with the stars", "survivor", "masked singer", 
     "big brother", "bachelor", "love island", "masterchef", "voice", "kardashians",
-    "young and the restless", "bold and the beautiful", "days of our lives", "general hospital",
-    "baking championship", "relative race", "heartland"
+    "young and the restless", "bold and the beautiful", "days of our lives", "general hospital"
   ];
   if (blockedTitles.some(title => name.includes(title))) {
     return { exclude: true, reason: `Excluded: Blocklisted title (${showData.name})` };
@@ -146,29 +145,29 @@ function evaluateExclusion(showData, tmdbMeta) {
 
   const { certification, genres } = tmdbMeta;
 
-  // 2. Reject general Reality TV or prime-time Drama shows
-  if (genres.includes("reality") || (genres.includes("drama") && !genres.includes("animation"))) {
-    return { exclude: true, reason: `Excluded: Non-kids genre (Genres: ${genres.join(", ")})` };
+  // 2. Genre MUST contain "kids" or "children"
+  const hasKidsOrChildrenGenre = (genres || []).some(g => {
+    const genreLower = String(g).toLowerCase();
+    return genreLower.includes("kids") || genreLower.includes("children");
+  });
+
+  if (!hasKidsOrChildrenGenre) {
+    return { exclude: true, reason: `Excluded: Genre does not contain 'kids' or 'children' (Genres: ${genres.join(', ') || 'none'})` };
   }
 
-  // 3. Strict Kids Genre Requirement (Broad 'family' alone is rejected)
-  const strictKidsGenres = ["animation", "kids", "children", "anime"];
-  const hasKidsGenre = genres.some(g => strictKidsGenres.includes(g));
-
-  if (!hasKidsGenre) {
-    return { exclude: true, reason: `Excluded: Lacks dedicated kids/animation genre (Genres: ${genres.join(", ")})` };
-  }
-
-  // 4. TMDB Certification Gatekeeper (Strictly PG & Below)
+  // 3. Strict Kids Certification Whitelist
   const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
-  if (certification) {
-    const certUpper = certification.toUpperCase();
-    if (!allowedCertifications.includes(certUpper)) {
-      return { exclude: true, reason: `Excluded: Unallowed certification '${certification}'` };
-    }
+  
+  if (!certification) {
+    return { exclude: true, reason: "Excluded: Missing official age certification" };
   }
 
-  return { exclude: false, reason: `Passed strict kids check (${certification || 'Safe'})` };
+  const certUpper = certification.toUpperCase();
+  if (!allowedCertifications.includes(certUpper)) {
+    return { exclude: true, reason: `Excluded: Certification '${certification}' not in kids whitelist` };
+  }
+
+  return { exclude: false, reason: `Passed kids genre & certification check (${certification})` };
 }
 
 async function build() {
@@ -201,7 +200,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict kids filtering...`);
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict kids checks...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
