@@ -149,7 +149,7 @@ function evaluateExclusion(showData, tmdbMeta) {
   const hasValidGenre = (genres || []).some(g => {
     const genreLower = String(g).toLowerCase();
     return genreLower.includes("kids") || 
-           genreLower.includes("children") || 
+           genreLower.includes("children")
            
   });
 
