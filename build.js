@@ -1,7 +1,7 @@
 /**
  * build.js — Stremio & Wako Kids Weekly Schedule
  * Discovery & Episode Map: TVMaze
- * Filtering & Metadata: TMDB Content Ratings & Kids Genre Verification
+ * Filtering & Metadata: TMDB Kids/Children Genre Verification
  */
 
 import fs from "fs";
@@ -155,19 +155,7 @@ function evaluateExclusion(showData, tmdbMeta) {
     return { exclude: true, reason: `Excluded: Genre does not contain 'kids' or 'children' (Genres: ${genres.join(', ') || 'none'})` };
   }
 
-  // 3. Strict Kids Certification Whitelist
-  const allowedCertifications = ["TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "G", "TV-PG", "PG", "C", "C8", "E"];
-  
-  if (!certification) {
-    return { exclude: true, reason: "Excluded: Missing official age certification" };
-  }
-
-  const certUpper = certification.toUpperCase();
-  if (!allowedCertifications.includes(certUpper)) {
-    return { exclude: true, reason: `Excluded: Certification '${certification}' not in kids whitelist` };
-  }
-
-  return { exclude: false, reason: `Passed kids genre & certification check (${certification})` };
+  return { exclude: false, reason: `Passed kids genre check (Genres: ${genres.join(', ')})` };
 }
 
 async function build() {
@@ -200,7 +188,7 @@ async function build() {
     }
   }
 
-  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running strict kids checks...`);
+  console.log(`Discovered ${activeShowIds.size} shows from TVMaze schedule. Running genre checks...`);
 
   const metas = [];
   for (const showId of activeShowIds) {
@@ -274,11 +262,11 @@ async function build() {
   fs.writeFileSync(filePath, JSON.stringify({ metas: finalMetas }, null, 2));
 
   console.log("\n=================================================================================");
-  console.log("            STRICT KIDS FILTERING REPORT                                         ");
+  console.log("            GENRE-BASED KIDS FILTERING REPORT                                    ");
   console.log("=================================================================================");
   console.table(auditLogs);
   console.log("=================================================================================\n");
-  console.log(`Successfully generated ${finalMetas.length} safe kids shows in the catalog.`);
+  console.log(`Successfully generated ${finalMetas.length} kids shows in the catalog.`);
 }
 
 build().catch(err => { console.error(err); process.exit(1); });
