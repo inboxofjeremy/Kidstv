@@ -17,7 +17,7 @@ if (!TMDB_API_KEY || TMDB_API_KEY.trim() === "") {
 }
 
 const CATALOG_DIR = path.join(__dirname, "catalog", "series");
-const RETENTION_DAYS_BACK = 90;
+const RETENTION_DAYS_BACK = 120;
 const TMDB_KIDS_GENRE_ID = "10762"; // TMDB Official Genre ID for 'Kids'
 
 const auditLogs = [];
@@ -111,16 +111,24 @@ async function build() {
     d.setDate(d.getDate() - i);
     const dateStr = pacificDateString(d);
 
-    const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_genres=${TMDB_KIDS_GENRE_ID}&with_original_language=en&sort_by=popularity.desc`;
-    const data = await fetchJSON(discoverUrl);
+    let page = 1;
+    let totalPages = 1;
 
-    if (data?.results) {
-      for (const show of data.results) {
-        if (!discoveredShows.has(show.id)) {
-          discoveredShows.set(show.id, dateStr);
+    do {
+      const discoverUrl = `https://api.themoviedb.org/3/discover/tv?api_key=${TMDB_API_KEY}&air_date.gte=${dateStr}&air_date.lte=${dateStr}&with_genres=${TMDB_KIDS_GENRE_ID}&with_original_language=en&sort_by=popularity.desc&page=${page}`;
+      const data = await fetchJSON(discoverUrl);
+
+      if (data?.results) {
+        totalPages = data.total_pages || 1;
+
+        for (const show of data.results) {
+          if (!discoveredShows.has(show.id)) {
+            discoveredShows.set(show.id, dateStr);
+          }
         }
       }
-    }
+      page++;
+    } while (page <= totalPages);
   }
 
   console.log(`Discovered ${discoveredShows.size} unique English kids shows airing in the last 9 days. Processing metadata...`);
